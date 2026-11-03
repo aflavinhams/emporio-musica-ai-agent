@@ -2,20 +2,31 @@
 import inspect
 import json
 import os
+import re
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from src.agent.prompts import SYSTEM_PROMPT
+
 from src.tools.catalog import search_products
+
 from src.tools.promotions import (
     get_active_promotions,
     get_product_promotion,
 )
+
 from src.tools.orders import (
     get_order_status,
     get_order_items,
 )
+
+from src.tools.comparison import (
+    compare_products,
+    format_comparison,
+    parse_comparison_request,
+)
+
 from src.retrieval.policy_retriever import search_policies
 
 
@@ -33,6 +44,7 @@ TOOL_FUNCTIONS = {
     "get_order_status": get_order_status,
     "get_order_items": get_order_items,
     "search_policies": search_policies,
+    "compare_products": compare_products,
 }
 
 
@@ -58,13 +70,12 @@ TOOLS = [
     tool_schema(
         "search_products",
         (
-            "Search the store's product catalog by product name, "
+            "Search the store's product catalog by name, "
             "category, price and availability. "
-            "Use this tool whenever customers ask about instruments, "
-            "prices or stock. "
-            "The query can contain a product name or category "
-            "in Portuguese, such as 'violão' or 'guitarra'. "
-            "For a budget of R$ 1000, use max_price=1000. "
+            "Use this tool for questions about instruments, "
+            "prices and stock. "
+            "The query can contain Portuguese keywords such "
+            "as 'violão', 'guitarra' or a product name. "
             "Use only_available=true for available products."
         ),
         {
@@ -82,20 +93,23 @@ TOOLS = [
             },
             "only_available": {
                 "type": "boolean",
-                "description": "Return only available products.",
+                "description": "Return available products only.",
             },
         },
     ),
 
     tool_schema(
         "get_active_promotions",
-        "Retrieve active promotions and discounted prices.",
+        (
+            "Retrieve active promotions, original prices, "
+            "discount percentages and promotional prices."
+        ),
         {},
     ),
 
     tool_schema(
         "get_product_promotion",
-        "Retrieve an active promotion for a product ID.",
+        "Find an active promotion for a specific product ID.",
         {
             "product_id": {
                 "type": "integer",
@@ -108,8 +122,8 @@ TOOLS = [
     tool_schema(
         "get_order_status",
         (
-            "Retrieve order status after matching the order ID "
-            "and the customer's registered email. "
+            "Retrieve an order's status after matching "
+            "its ID and registered customer email. "
             "Both values must be provided by the customer."
         ),
         {
@@ -128,8 +142,8 @@ TOOLS = [
     tool_schema(
         "get_order_items",
         (
-            "Retrieve products from an order after checking "
-            "the order ID and registered customer email."
+            "Retrieve products from an order after matching "
+            "its ID and registered customer email."
         ),
         {
             "order_id": {
@@ -146,10 +160,9 @@ TOOLS = [
         "search_policies",
         (
             "Search the store policy manual. "
-            "Use this tool for questions about returns, "
-            "refunds, exchanges, payments, shipping, "
-            "warranties and opening hours. "
-            "Returns relevant passages and page references."
+            "Required for questions about returns, refunds, "
+            "exchanges, shipping, payments, warranties "
+            "and opening hours."
         ),
         {
             "query": {
@@ -158,10 +171,30 @@ TOOLS = [
             },
             "top_k": {
                 "type": "integer",
-                "description": "Number of relevant passages.",
+                "description": "Number of passages to retrieve.",
             },
         },
         ["query"],
+    ),
+
+    tool_schema(
+        "compare_products",
+        (
+            "Compare two specific instruments using verified "
+            "catalog specifications, prices and availability. "
+            "Do not infer sound quality or product superiority."
+        ),
+        {
+            "product_a": {
+                "type": "string",
+                "description": "First product name.",
+            },
+            "product_b": {
+                "type": "string",
+                "description": "Second product name.",
+            },
+        },
+        ["product_a", "product_b"],
     ),
 ]
 
@@ -187,12 +220,11 @@ def execute_tool(name: str, arguments: dict) -> str:
 
     try:
         signature = inspect.signature(function)
-        allowed_parameters = set(signature.parameters)
 
         filtered_arguments = {
             key: value
             for key, value in arguments.items()
-            if key in allowed_parameters
+            if key in signature.parameters
         }
 
         result = function(**filtered_arguments)
@@ -211,6 +243,32 @@ def execute_tool(name: str, arguments: dict) -> str:
 
 
 # ==========================================================
+# RESPONSE VALIDATION
+# ==========================================================
+
+def is_invalid_response(response: str) -> bool:
+    """Detect placeholders and incomplete generated responses."""
+
+    if not response or not response.strip():
+        return True
+
+    invalid_patterns = [
+        r"\[Product\s*\d+\]",
+        r"\[Description\]",
+        r"\[Product Name\]",
+        r"\[Price\]",
+        r"\[Nome do Produto\]",
+        r"\[Descrição\]",
+        r"and so on for all",
+    ]
+
+    return any(
+        re.search(pattern, response, re.IGNORECASE)
+        for pattern in invalid_patterns
+    )
+
+
+# ==========================================================
 # AI AGENT
 # ==========================================================
 
@@ -219,13 +277,15 @@ class MusicStoreAgent:
 
     def __init__(self, client=None, model=None):
 
-        self.client = client or OpenAI(
-            base_url=os.getenv(
-                "OLLAMA_BASE_URL",
-                "http://localhost:11434/v1",
-            ),
-            api_key="ollama",
-            timeout=120.0,
+        self.client = (
+            client if client is not None else OpenAI(
+                base_url=os.getenv(
+                    "OLLAMA_BASE_URL",
+                    "http://localhost:11434/v1",
+                ),
+                api_key="ollama",
+                timeout=120.0,
+            )
         )
 
         self.model = model or os.getenv(
@@ -240,13 +300,185 @@ class MusicStoreAgent:
             }
         ]
 
+    # ======================================================
+    # MODEL GENERATION
+    # ======================================================
+
+    def _generate_response(self, messages, use_tools=True):
+        """Generate an LLM response using Ollama."""
+
+        parameters = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0,
+            "extra_body": {
+                "think": False,
+                "options": {
+                    "num_predict": 1024,
+                },
+            },
+        }
+
+        if use_tools:
+            parameters["tools"] = TOOLS
+            parameters["tool_choice"] = "auto"
+
+        return self.client.chat.completions.create(
+            **parameters
+        )
+
+    # ======================================================
+    # INVALID RESPONSE RETRY
+    # ======================================================
+
+    def _retry_invalid_response(
+        self,
+        messages,
+        invalid_answer
+    ):
+        """Retry an invalid response using retrieved evidence."""
+
+        retry_messages = list(messages)
+
+        retry_messages.append({
+            "role": "assistant",
+            "content": invalid_answer,
+        })
+
+        retry_messages.append({
+            "role": "user",
+            "content": (
+                "Sua resposta anterior está incompleta ou "
+                "contém placeholders. Corrija a resposta. "
+                "Responda somente em português brasileiro. "
+                "Utilize exclusivamente os dados reais "
+                "retornados pelas ferramentas anteriores. "
+                "Não invente nomes, preços, características "
+                "ou disponibilidade de produtos. "
+                "Não utilize placeholders. "
+                "Se houver vários produtos, apresente "
+                "de 3 a 5 opções verificadas."
+            ),
+        })
+
+        response = self._generate_response(
+            retry_messages,
+            use_tools=False,
+        )
+
+        answer = (
+            response.choices[0].message.content or ""
+        )
+
+        if is_invalid_response(answer):
+            return (
+                "Não consegui apresentar as informações "
+                "com segurança neste momento. "
+                "Pode tentar reformular sua pergunta?"
+            )
+
+        return answer
+
+    # ======================================================
+    # DETERMINISTIC PRODUCT COMPARISON
+    # ======================================================
+
+    def _handle_product_comparison(
+        self,
+        user_message: str
+    ) -> str | None:
+        """Handle explicit product comparisons with catalog data."""
+
+        comparison_request = parse_comparison_request(
+            user_message
+        )
+
+        if comparison_request is None:
+            return None
+
+        product_a, product_b = comparison_request
+
+        comparison = compare_products(
+            product_a,
+            product_b,
+        )
+
+        if not comparison["success"]:
+            return None
+
+        answer = format_comparison(comparison)
+
+        # Register the actual local execution in conversation
+        # history using the same structure as tool calling.
+        call_id = f"local_comparison_{len(self.messages)}"
+
+        arguments = json.dumps(
+            {
+                "product_a": product_a,
+                "product_b": product_b,
+            },
+            ensure_ascii=False,
+        )
+
+        self.messages.extend([
+            {
+                "role": "user",
+                "content": user_message,
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "compare_products",
+                            "arguments": arguments,
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": json.dumps(
+                    comparison,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": answer,
+            },
+        ])
+
+        print("\n[Tool called: compare_products]")
+        print("[Comparison based on catalog specifications]")
+
+        return answer
+
+    # ======================================================
+    # MAIN CONVERSATION FLOW
+    # ======================================================
+
     def chat(self, user_message: str) -> str:
-        """Process a user message and execute tool calls."""
+        """Process a customer message and execute tool calls."""
 
         if not user_message.strip():
             return "Por favor, escreva sua pergunta."
 
-        # Preserve the original history if a request fails.
+        # Handle explicit comparisons deterministically.
+        comparison_answer = self._handle_product_comparison(
+            user_message
+        )
+
+        if comparison_answer is not None:
+            return comparison_answer
+
+        # Work with a copy to preserve the current history
+        # if model execution fails.
         messages = list(self.messages)
 
         messages.append({
@@ -258,16 +490,14 @@ class MusicStoreAgent:
 
         for _ in range(max_iterations):
 
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-                temperature=0,
-                extra_body={"think": False},
+            response = self._generate_response(
+                messages,
+                use_tools=True,
             )
 
-            assistant_message = response.choices[0].message
+            assistant_message = (
+                response.choices[0].message
+            )
 
             # --------------------------------------------------
             # FINAL RESPONSE
@@ -275,10 +505,13 @@ class MusicStoreAgent:
 
             if not assistant_message.tool_calls:
 
-                answer = assistant_message.content or (
-                    "Não consegui responder sua pergunta. "
-                    "Pode tentar novamente?"
-                )
+                answer = assistant_message.content or ""
+
+                if is_invalid_response(answer):
+                    answer = self._retry_invalid_response(
+                        messages,
+                        answer,
+                    )
 
                 messages.append({
                     "role": "assistant",
@@ -320,16 +553,12 @@ class MusicStoreAgent:
                     )
 
                 except (ValueError, TypeError):
-
                     result = json.dumps({
                         "error": "Invalid tool arguments"
                     })
 
-                # Development logs
                 print(f"\n[Tool called: {tool_name}]")
 
-                # Avoid printing customer emails or order details
-                # when inspecting tool execution.
                 if tool_name in {
                     "get_order_status",
                     "get_order_items",
@@ -346,7 +575,7 @@ class MusicStoreAgent:
                     "content": result,
                 })
 
-        # Do not persist incomplete conversations.
+        # Do not preserve incomplete model interactions.
         return (
             "Não consegui concluir a consulta. "
             "Por favor, tente reformular sua pergunta."
