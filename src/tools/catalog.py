@@ -1,6 +1,8 @@
 
 import csv
 from pathlib import Path
+import re
+import unicodedata
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
@@ -11,6 +13,33 @@ def load_csv(filename: str) -> list[dict]:
 
     with open(file_path, "r", encoding="utf-8-sig", newline="") as file:
         return list(csv.DictReader(file))
+
+def normalize_text(text: str) -> str:
+    """Normalize text for accent-insensitive product search."""
+    text = unicodedata.normalize("NFKD", text.casefold())
+    text = "".join(
+        char for char in text
+        if not unicodedata.combining(char)
+    )
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def matches_search(term: str, text: str) -> bool:
+    """Match terms while handling common Portuguese plurals."""
+    term = normalize_text(term)
+    text = normalize_text(text)
+
+    if term in text:
+        return True
+
+    # Handle common singular/plural forms such as violão/violões.
+    variants = {
+        "violao": "violoes",
+        "violoes": "violao",
+    }
+
+    alternative = variants.get(term)
+    return alternative is not None and alternative in text
 
 
 def search_products(
@@ -37,20 +66,35 @@ def search_products(
         price = float(product["price_brl"])
         stock = int(product["stock_quantity"])
         status = product["status"]
+
         category_name = categories.get(
             product["category_id"], "Unknown"
         )
 
-        if query.casefold() not in name.casefold():
+        # Search by product name or category
+        if query.strip():
+            matches_name = matches_search(query, name)
+            matches_category = matches_search(
+                query, category_name
+            )
+
+            if not (matches_name or matches_category):
+                continue
+
+        # Filter by category
+        if category.strip() and not matches_search(
+            category, category_name
+        ):
             continue
 
-        if category and category.casefold() not in category_name.casefold():
-            continue
-
+        # Filter by maximum price
         if max_price is not None and price > max_price:
             continue
 
-        if only_available and (status != "active" or stock <= 0):
+        # Filter by stock availability
+        if only_available and (
+            status != "active" or stock <= 0
+        ):
             continue
 
         results.append({
