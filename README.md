@@ -235,6 +235,16 @@ python -m unittest discover -s tests -p "test_catalog*.py" -v
 
 Tests mock model/tool interactions where appropriate; they do not replace end-to-end checks with the running Ollama model.
 
+## AI-assisted development
+
+**Tool used:** ChatGPT (OpenAI), as a coding and development assistant.
+
+ChatGPT supported implementation planning, Python code drafting and review, debugging, automated test design, and technical documentation. The development workflow was iterative: suggested changes were applied to the local project, exercised with the Ollama-powered agent, checked against the provided CSV datasets and store policy PDF, and adjusted when actual results revealed issues.
+
+Examples of issues identified and resolved during this process include Portuguese catalog query normalization (such as *guitarras elétricas*), improving retrieval of the online return policy, distinguishing purchase dates from receipt dates, preventing the assistant from claiming it can process returns or refunds, and adding regression tests for those behaviors.
+
+AI-generated suggestions were not treated as verified by default. The final implementation decisions were guided by the challenge requirements, the available data, local test results, and observed customer conversations. Known limitations and remaining production-readiness gaps are documented below.
+
 ## Limitations and potential improvements
 
 - **Not a production commerce service:** no live inventory sync, purchase processing, payment execution, return initiation, or refund processing.
