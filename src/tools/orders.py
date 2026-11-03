@@ -69,18 +69,28 @@ def get_order_status(
             )
         }
 
+    
     return {
         "success": True,
         "order_id": int(order["order_id"]),
-        "order_date": order["order_date"],
-        "status": order["status"],
+        "order_status": order["status"],
+        "purchase_date": order["order_date"],
+        "estimated_delivery_date": (
+            order["estimated_delivery"] or None
+        ),
+        "actual_delivery_date": None,
         "total_brl": float(order["total_brl"]),
         "payment_method": order["payment_method"],
         "tracking_code": order["tracking_code"] or None,
-        "estimated_delivery": (
-            order["estimated_delivery"] or None
+        "data_source": "Historical order records (CSV)",
+        "important_note": (
+            "The purchase date is NOT the delivery date. "
+            "The estimated delivery date is only a forecast. "
+            "The actual delivery date is unavailable. "
+            "Never claim a delivery date or status update time."
         ),
     }
+
 
 
 def get_order_items(

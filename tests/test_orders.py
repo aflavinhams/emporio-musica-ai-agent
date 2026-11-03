@@ -61,7 +61,7 @@ class TestOrders(unittest.TestCase):
         )
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["status"], "shipped")
+        self.assertEqual(result["order_status"], "shipped")
 
     def test_invalid_email(self):
         result = get_order_status(
@@ -119,6 +119,17 @@ class TestOrders(unittest.TestCase):
         )
 
         self.assertFalse(result["success"])
+
+    def test_delivery_date_not_inferred(self):
+        result = get_order_status(
+            10, "customer@example.com"
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            result["purchase_date"], "2025-10-01"
+        )
+        self.assertIsNone(result["actual_delivery_date"])
 
 
 if __name__ == "__main__":
