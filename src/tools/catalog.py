@@ -1,116 +1,418 @@
 
 import csv
-from pathlib import Path
+import math
 import re
 import unicodedata
+from pathlib import Path
+
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 
-def load_csv(filename: str) -> list[dict]:
-    """Load records from a CSV file."""
-    file_path = DATA_DIR / filename
+# ==========================================================
+# CSV LOADING
+# ==========================================================
 
-    with open(file_path, "r", encoding="utf-8-sig", newline="") as file:
+def load_csv(filename):
+    """Load records from a CSV file in the project data directory."""
+
+    path = Path(filename)
+
+    if not path.is_absolute() and not path.exists():
+        path = DATA_DIR / filename
+
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
         return list(csv.DictReader(file))
 
-def normalize_text(text: str) -> str:
-    """Normalize text for accent-insensitive product search."""
-    text = unicodedata.normalize("NFKD", text.casefold())
-    text = "".join(
-        char for char in text
-        if not unicodedata.combining(char)
+
+# ==========================================================
+# TEXT NORMALIZATION
+# ==========================================================
+
+def normalize_text(value):
+    """Normalize accents, case and whitespace."""
+
+    text = unicodedata.normalize(
+        "NFKD",
+        str(value or "").casefold(),
     )
+
+    text = "".join(
+        character
+        for character in text
+        if not unicodedata.combining(character)
+    )
+
     return re.sub(r"\s+", " ", text).strip()
 
 
-def matches_search(term: str, text: str) -> bool:
-    """Match terms while handling common Portuguese plurals."""
-    term = normalize_text(term)
-    text = normalize_text(text)
+def normalize_search_terms(value):
+    """
+    Normalize common Portuguese instrument names.
 
-    if term in text:
+    Examples:
+        guitarras elétricas -> guitarra
+        guitarra elétrica  -> guitarra
+        violões            -> violao
+    """
+
+    text = normalize_text(value)
+
+    replacements = [
+        (r"\bvioloes\b", "violao"),
+        (r"\bviolao\b", "violao"),
+        (r"\bguitarras\b", "guitarra"),
+        (r"\bteclados\b", "teclado"),
+        (r"\bpianos\b", "piano"),
+        (r"\bbaixos\b", "baixo"),
+        (r"\bukuleles\b", "ukulele"),
+        (r"\bbaterias\b", "bateria"),
+    ]
+
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text)
+
+    # The Guitarras category contains electric guitars.
+    # Treat singular and plural variations consistently.
+    if re.search(r"\bguitarra\b", text):
+        text = re.sub(
+            r"\b(eletrica|eletricas|eletrico|eletricos)\b",
+            " ",
+            text,
+        )
+
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# ==========================================================
+# PRODUCT SEARCH MATCHING
+# ==========================================================
+
+def matches_search(product_name, category_name, query):
+    """
+    Match a query against product name and category.
+
+    All meaningful query terms must match after normalization.
+    """
+
+    if not query or not str(query).strip():
         return True
 
-    # Handle common singular/plural forms such as violão/violões.
-    variants = {
-        "violao": "violoes",
-        "violoes": "violao",
+    searchable = normalize_search_terms(
+        f"{product_name} {category_name}"
+    )
+
+    normalized_query = normalize_search_terms(query)
+
+    if not normalized_query:
+        return True
+
+    if normalized_query in searchable:
+        return True
+
+    ignored_words = {
+        "a",
+        "as",
+        "o",
+        "os",
+        "de",
+        "da",
+        "das",
+        "do",
+        "dos",
+        "em",
+        "para",
+        "por",
+        "com",
+        "um",
+        "uma",
+        "quero",
+        "procurando",
+        "voces",
+        "vendem",
+        "tem",
+        "modelos",
+        "modelo",
+        "disponiveis",
     }
 
-    alternative = variants.get(term)
-    return alternative is not None and alternative in text
+    query_words = [
+        word
+        for word in normalized_query.split()
+        if word not in ignored_words
+    ]
 
+    if not query_words:
+        return False
+
+    searchable_words = set(searchable.split())
+
+    return all(
+        word in searchable_words
+        for word in query_words
+    )
+
+
+# ==========================================================
+# DATA CONVERSION
+# ==========================================================
+
+def _to_float(value, default=0.0):
+    """Convert numeric CSV values to floats."""
+
+    if value is None or str(value).strip() == "":
+        return default
+
+    try:
+        return float(
+            str(value).strip().replace(",", ".")
+        )
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value, default=0):
+    """Convert numeric CSV values to integers."""
+
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def _validate_max_price(max_price):
+    """
+    Validate a maximum price filter.
+
+    Raises:
+        ValueError: When the price is not numeric,
+                    negative or non-finite.
+    """
+
+    if max_price is None:
+        return None
+
+    try:
+        value = float(max_price)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "max_price must be a numeric value"
+        ) from exc
+
+    if not math.isfinite(value):
+        raise ValueError(
+            "max_price must be a finite number"
+        )
+
+    if value < 0:
+        raise ValueError(
+            "max_price cannot be negative"
+        )
+
+    return value
+
+
+# ==========================================================
+# CATEGORY MAPPING
+# ==========================================================
+
+def _category_mapping():
+    """Map category IDs to names from categories.csv."""
+
+    categories = load_csv("categories.csv")
+    mapping = {}
+
+    for category in categories:
+        category_id = (
+            category.get("category_id")
+            or category.get("id")
+        )
+
+        category_name = (
+            category.get("category_name")
+            or category.get("name")
+            or category.get("category")
+        )
+
+        if category_id is not None and category_name:
+            mapping[
+                str(category_id).strip()
+            ] = category_name
+
+    return mapping
+
+
+# ==========================================================
+# PRODUCT CATALOG SEARCH
+# ==========================================================
 
 def search_products(
-    query: str = "",
-    max_price: float | None = None,
-    category: str = "",
-    only_available: bool = True
-) -> list[dict]:
-    """Search products by name, category, price and availability."""
+    query="",
+    max_price=None,
+    category="",
+    only_available=True,
+):
+    """
+    Search musical instruments using verified catalog records.
 
-    if max_price is not None and max_price < 0:
-        raise ValueError("max_price must be non-negative")
+    Args:
+        query:
+            Product name, model or instrument type.
 
-    categories = {
-        row["category_id"]: row["name"]
-        for row in load_csv("categories.csv")
-    }
+        max_price:
+            Optional non-negative maximum price in BRL.
+
+        category:
+            Optional category name.
+
+        only_available:
+            When True, include only active products
+            with a positive stock quantity.
+
+    Returns:
+        A list of product dictionaries ordered by price.
+
+    Raises:
+        ValueError:
+            If max_price is invalid or negative.
+    """
+
+    # Validate the price before executing the search.
+    max_price = _validate_max_price(max_price)
 
     products = load_csv("products.csv")
+    category_names = _category_mapping()
+
     results = []
 
     for product in products:
-        name = product["name"]
-        price = float(product["price_brl"])
-        stock = int(product["stock_quantity"])
-        status = product["status"]
-
-        category_name = categories.get(
-            product["category_id"], "Unknown"
+        product_id = (
+            product.get("product_id")
+            or product.get("id")
         )
 
-        # Search by product name or category
-        if query.strip():
-            matches_name = matches_search(query, name)
-            matches_category = matches_search(
-                query, category_name
+        product_name = (
+            product.get("name")
+            or product.get("product_name")
+            or ""
+        )
+
+        category_id = product.get("category_id")
+
+        category_name = (
+            category_names.get(
+                str(category_id).strip(),
+                "",
+            )
+            if category_id is not None
+            else ""
+        )
+
+        if not category_name:
+            category_name = (
+                product.get("category_name")
+                or product.get("category")
+                or ""
             )
 
-            if not (matches_name or matches_category):
+        price = _to_float(
+            product.get(
+                "price_brl",
+                product.get("price"),
+            )
+        )
+
+        stock = _to_int(
+            product.get(
+                "stock_quantity",
+                product.get("stock", 0),
+            )
+        )
+
+        status = str(
+            product.get("status", "active")
+        ).strip().casefold()
+
+        description = (
+            product.get("description")
+            or ""
+        )
+
+        # ----------------------------------------------
+        # AVAILABILITY FILTER
+        # ----------------------------------------------
+
+        if only_available:
+            if stock <= 0:
                 continue
 
-        # Filter by category
-        if category.strip() and not matches_search(
-            category, category_name
-        ):
-            continue
+            if status not in {
+                "active",
+                "available",
+                "ativo",
+                "disponivel",
+            }:
+                continue
 
-        # Filter by maximum price
+        # ----------------------------------------------
+        # PRICE FILTER
+        # ----------------------------------------------
+
         if max_price is not None and price > max_price:
             continue
 
-        # Filter by stock availability
-        if only_available and (
-            status != "active" or stock <= 0
+        # ----------------------------------------------
+        # CATEGORY FILTER
+        # ----------------------------------------------
+
+        if category:
+            requested_category = normalize_search_terms(
+                category
+            )
+
+            current_category = normalize_search_terms(
+                category_name
+            )
+
+            if (
+                requested_category not in current_category
+                and current_category not in requested_category
+            ):
+                continue
+
+        # ----------------------------------------------
+        # NAME AND QUERY MATCHING
+        # ----------------------------------------------
+
+        if not matches_search(
+            product_name,
+            category_name,
+            query,
         ):
             continue
 
         results.append({
-            "product_id": int(product["product_id"]),
-            "name": name,
+            "product_id": _to_int(product_id),
+            "name": product_name,
             "category": category_name,
             "price_brl": price,
             "stock_quantity": stock,
-            "status": status,
-            "description": product["description"],
+            "status": product.get(
+                "status",
+                "active",
+            ),
+            "description": description,
         })
 
-    return sorted(
-        results,
+    # ----------------------------------------------
+    # SORT BY PRICE AND NAME
+    # ----------------------------------------------
+
+    results.sort(
         key=lambda product: (
             product["price_brl"],
-            product["name"]
+            normalize_text(product["name"]),
         )
     )
+
+    return results

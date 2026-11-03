@@ -15,14 +15,14 @@ Promotion lookup and discount information.
 Oi! Quais instrumentos estão em promoção?
 
 ### Assistant
-Olá! Estamos com as seguintes ofertas ativas:
+Oi! Atualmente temos as seguintes ofertas para instrumentos:
 
-1. Kalani KAL-700T Tenor Natural: Desconto de 10% (R$ 359,00 → R$ 323,10). Estoque: 11 unidades.  
-2. Ohana CK-20 Concert Natural: Desconto de 20% (R$ 549,00 → R$ 439,20). Estoque: 6 unidades.  
-3. Crafter HT-100 Folk Aço Natural: Desconto de 18% (R$ 2.399,00 → R$ 1.967,18). Estoque: 3 unidades.  
-4. Taylor 110e Dreadnought Natural: Desconto de 8% (R$ 5.999,00 → R$ 5.519,08). Estoque: 4 unidades.  
+1. Kalani KAL-700T Tenor Natural: 10% de desconto (R$359,00 → R$323,10), 11 unidades disponíveis.  
+2. Ohana CK-20 Concert Natural: 20% de desconto (R$549,00 → R$439,20), 6 unidades disponíveis.  
+3. Crafter HT-100 Folk Aço Natural: 18% de desconto (R$2.399,00 → R$1.967,18), 3 unidades disponíveis.  
+4. Taylor 110e Dreadnought Natural: 8% de desconto (R$5.999,00 → R$5.519,08), 4 unidades disponíveis.  
 
-Quer saber mais detalhes de algum produto? 😊
+Observação: Não há desconto adicional via PIX para essas ofertas.
 
 ### Tools Executed
 - `get_active_promotions`
@@ -31,8 +31,8 @@ Quer saber mais detalhes de algum produto? 😊
 Gostei do ukulele Ohana CK-20. Quanto ele está custando com o desconto?
 
 ### Assistant
-O Ohana CK-20 Concert Natural está com desconto de 20% e custa R$ 439,20 (original: R$ 549,00). 😊  
-Quer saber mais detalhes ou confirmar a compra?
+O Ohana CK-20 Concert Natural está com desconto de 20% no preço original (R$549,00), totalizando R$439,20. 😊  
+Temos 6 unidades disponíveis para você!
 
 ### Tools Executed
 - None
@@ -41,21 +41,16 @@ Quer saber mais detalhes ou confirmar a compra?
 Se eu pagar no PIX, consigo mais 5% de desconto?
 
 ### Assistant
-Não, o produto Ohana CK-20 Concert Natural não tem desconto adicional para pagamento no PIX. O desconto de 20% já está incluso no preço promocional de R$ 439,20 (original: R$ 549,00). 😊  
+O desconto de 5% no PIX não é cumulativo com promoções. Segundo as políticas da Empório da Música, o desconto de PIX (5%) só se aplica ao preço de tabela regular do produto, não a preços já promocionais. Portanto, se você adquirir um item com promoção (como Black Friday ou Aniversário da Loja), o desconto de 5% no PIX não será aplicado. 
 
-Se você quiser confirmar se há políticas específicas para PIX no geral, posso ajudar a buscar na nossa política de pagamentos!
+Para confirmar: 
+- Promoções (ex.: 15% de desconto em Black Friday) já reduzem o preço do produto. 
+- O desconto de 5% no PIX só é válido para o preço original do produto (não para preços já promocionais).
 
-### Tools Executed
-- None
-
-### Customer
-Entendi, obrigada!
-
-### Assistant
-De nada! Se precisar de mais alguma coisa, estou aqui para ajudar. 😊
+Se precisar de mais esclarecimentos, estou aqui para ajudar! 😊
 
 ### Tools Executed
-- None
+- `search_policies`
 
 ## Notes
 - Transcript captured from an actual local execution.

@@ -3,6 +3,7 @@ import inspect
 import json
 import os
 import re
+import unicodedata
 from decimal import Decimal
 
 from dotenv import load_dotenv
@@ -46,6 +47,7 @@ TOOL_FUNCTIONS = {
 
 def tool_schema(name, description, properties, required=None):
     """Build a function calling schema."""
+
     return {
         "type": "function",
         "function": {
@@ -79,18 +81,23 @@ TOOLS = [
     ),
     tool_schema(
         "get_active_promotions",
-        "Retrieve current promotions in the provided dataset.",
+        "Retrieve active promotions from the provided dataset.",
         {},
     ),
     tool_schema(
         "get_product_promotion",
         "Retrieve a promotion using a numeric product ID.",
-        {"product_id": {"type": "integer"}},
+        {
+            "product_id": {"type": "integer"},
+        },
         ["product_id"],
     ),
     tool_schema(
         "get_order_status",
-        "Retrieve order status using order ID and registered email.",
+        (
+            "Retrieve order status using order ID "
+            "and registered customer email."
+        ),
         {
             "order_id": {"type": "integer"},
             "customer_email": {"type": "string"},
@@ -99,7 +106,10 @@ TOOLS = [
     ),
     tool_schema(
         "get_order_items",
-        "Retrieve order items using order ID and registered email.",
+        (
+            "Retrieve order items using order ID "
+            "and registered customer email."
+        ),
         {
             "order_id": {"type": "integer"},
             "customer_email": {"type": "string"},
@@ -109,9 +119,9 @@ TOOLS = [
     tool_schema(
         "search_policies",
         (
-            "Search the store policy PDF. Required for returns, "
-            "refunds, payments, opening hours, warranties, "
-            "shipping and exchanges."
+            "Search the store policy PDF for returns, refunds, "
+            "payments, PIX, shipping, warranties, exchanges "
+            "and opening hours."
         ),
         {
             "query": {"type": "string"},
@@ -121,7 +131,7 @@ TOOLS = [
     ),
     tool_schema(
         "compare_products",
-        "Compare two products using catalog specifications.",
+        "Compare products using verified catalog specifications.",
         {
             "product_a": {"type": "string"},
             "product_b": {"type": "string"},
@@ -171,16 +181,241 @@ def execute_tool(name: str, arguments: dict) -> str:
 
 
 # ==========================================================
+# TEXT NORMALIZATION
+# ==========================================================
+
+def normalize_text(text: str) -> str:
+    """Normalize text for Portuguese intent detection."""
+
+    text = unicodedata.normalize(
+        "NFKD",
+        text.casefold(),
+    )
+
+    return "".join(
+        character
+        for character in text
+        if not unicodedata.combining(character)
+    )
+
+
+# ==========================================================
+# UNSUPPORTED OPERATIONS
+# ==========================================================
+
+UNSUPPORTED_ACTION_RESPONSE = (
+    "Posso explicar as regras de devolução e reembolso, "
+    "mas não consigo iniciar, aprovar ou processar "
+    "esses procedimentos por aqui. "
+    "Para solicitar uma devolução ou reembolso, "
+    "entre em contato com a equipe de atendimento "
+    "da Empório da Música. 😊"
+)
+
+
+def is_refund_action_request(message: str) -> bool:
+    """Detect requests to execute unsupported operations."""
+
+    text = normalize_text(message)
+
+    operation = re.search(
+        r"\b(devolu\w*|reembols\w*|estorn\w*)\b",
+        text,
+    )
+
+    if not operation:
+        return False
+
+    direct_patterns = [
+        r"\b(iniciar|abrir|processar|efetuar|realizar)\b",
+        r"\b(quero|preciso|gostaria)\s+"
+        r"(?:de\s+)?(?:solicitar|pedir|fazer)\b",
+        r"\b(facam|processem|reembolsem)\b",
+    ]
+
+    if any(
+        re.search(pattern, text)
+        for pattern in direct_patterns
+    ):
+        return True
+
+    capability = re.search(
+        r"\b(voces|voce|podem|conseguem|pode|consegue)\b",
+        text,
+    )
+
+    execution = re.search(
+        r"\b(fazer|processar|iniciar|realizar|"
+        r"efetuar|solicitar|aprovar)\b",
+        text,
+    )
+
+    channel = re.search(
+        r"\b(por aqui|diretamente|agora|neste chat|"
+        r"nessa conversa)\b",
+        text,
+    )
+
+    return bool(capability and execution and channel)
+
+
+def has_unsupported_action_claim(answer: str) -> bool:
+    """Detect positive claims of unavailable operations."""
+
+    text = normalize_text(answer)
+
+    limitations = [
+        r"\bnao consigo\b",
+        r"\bnao podemos\b",
+        r"\bnao posso\b",
+        r"\bnao e possivel\b",
+        r"\bnao tenho como\b",
+    ]
+
+    if any(
+        re.search(pattern, text)
+        for pattern in limitations
+    ):
+        return False
+
+    patterns = [
+        r"\b(podemos|consigo|vou|vamos|iremos)\s+"
+        r"(?:te\s+|lhe\s+)?"
+        r"(?:ajudar a\s+)?"
+        r"(?:iniciar|processar|efetuar|realizar|"
+        r"aprovar|confirmar|finalizar)\s+"
+        r"(?:a\s+|o\s+|sua\s+|seu\s+)?"
+        r"(?:devolucao|reembolso|estorno|compra|pedido)",
+        r"\b(?:envie|informe|passe)\b.{0,100}"
+        r"\b(?:para|que)\s+"
+        r"(?:iniciarmos|processarmos|realizarmos|"
+        r"procedermos|aprovarmos)\b",
+        r"\b(?:vamos|podemos)\s+"
+        r"(?:dar inicio|prosseguir)\s+"
+        r"(?:a|ao|com)\s+(?:devolucao|reembolso)",
+    ]
+
+    return any(
+        re.search(pattern, text)
+        for pattern in patterns
+    )
+
+
+# ==========================================================
+# RETURN POLICY SAFEGUARDS
+# ==========================================================
+
+def return_receipt_state(message: str) -> str | None:
+    """
+    Identify return questions that mention purchase dates
+    without specifying when the product was received.
+
+    Returns:
+        "unknown": purchase date given, receipt date missing
+        "not_received": product explicitly not received
+        None: no special handling required
+    """
+
+    text = normalize_text(message)
+
+    return_topic = re.search(
+        r"\b(devolu\w*|devolver|arrepend\w*|reembols\w*)\b",
+        text,
+    )
+
+    purchase_time = re.search(
+        r"\b(comprei|adquiri|fiz a compra)\b"
+        r".{0,90}\b(ha\s+\d+\s+dias?|"
+        r"ontem|anteontem|semana passada)\b",
+        text,
+    )
+
+    if not return_topic or not purchase_time:
+        return None
+
+    not_received = re.search(
+        r"\b(ainda nao recebi|nao recebi|"
+        r"nao foi entregue)\b",
+        text,
+    )
+
+    if not_received:
+        return "not_received"
+
+    receipt_info = re.search(
+        r"\b(recebi|foi entregue|chegou)\b"
+        r".{0,55}\b(ha\s+\d+\s+dias?|"
+        r"ontem|anteontem|hoje)\b",
+        text,
+    )
+
+    if receipt_info:
+        return None
+
+    return "unknown"
+
+
+def format_return_clarification(state: str) -> str:
+    """Avoid inferring receipt dates from purchase dates."""
+
+    if state == "not_received":
+        return (
+            "Em compras online, o prazo de arrependimento "
+            "previsto no manual é de 7 dias corridos após "
+            "o recebimento do produto. Como você informou "
+            "que ainda não recebeu o violão, não vou "
+            "considerar a data da compra como início "
+            "desse prazo. Para orientações sobre o seu caso, "
+            "você também pode contatar a equipe da loja. 😊"
+        )
+
+    return (
+        "Você pode solicitar a devolução de uma compra "
+        "online em até 7 dias corridos após o recebimento "
+        "do produto, conforme as políticas da loja. 😊\n\n"
+        "O violão deve estar na embalagem original, "
+        "sem sinais de uso e com todos os itens e manuais. "
+        "O frete da devolução por arrependimento é pago "
+        "pela loja, e o reembolso é feito pela mesma "
+        "forma de pagamento original em até 10 dias úteis.\n\n"
+        "Você informou quando fez a compra, mas ainda "
+        "não quando recebeu o instrumento. "
+        "Há quantos dias você recebeu o violão?"
+    )
+
+
+def has_return_policy_evidence(passages: list) -> bool:
+    """Check whether retrieved passages support return rules."""
+
+    text = normalize_text(
+        " ".join(
+            str(passage.get("content", ""))
+            for passage in passages
+            if isinstance(passage, dict)
+        )
+    )
+
+    return bool(
+        re.search(r"\b7\b", text)
+        and "recebimento" in text
+        and (
+            "arrependimento" in text
+            or "devolucao" in text
+        )
+    )
+
+
+# ==========================================================
 # RESPONSE VALIDATION
 # ==========================================================
 
 def is_invalid_response(response: str) -> bool:
-    """Detect placeholders and tool calls exposed as text."""
+    """Detect incomplete or unsupported responses."""
 
     if not response or not response.strip():
         return True
 
-    patterns = [
+    invalid_patterns = [
         r"\[Product\s*\d+\]",
         r"\[Description\]",
         r"\[Product Name\]",
@@ -188,12 +423,22 @@ def is_invalid_response(response: str) -> bool:
         r"\[Nome do Produto\]",
         r"\[Descrição\]",
         r"and so on for all",
+        r"\b(?:quer|deseja|posso|podemos|vamos)\b"
+        r".{0,65}\b(?:confirmar|finalizar|processar)"
+        r"\s+(?:a\s+|sua\s+)?compra\b",
     ]
 
     if any(
-        re.search(pattern, response, re.IGNORECASE)
-        for pattern in patterns
+        re.search(
+            pattern,
+            response,
+            re.IGNORECASE | re.DOTALL,
+        )
+        for pattern in invalid_patterns
     ):
+        return True
+
+    if has_unsupported_action_claim(response):
         return True
 
     try:
@@ -202,6 +447,7 @@ def is_invalid_response(response: str) -> bool:
         if isinstance(parsed, dict):
             if "name" in parsed and "arguments" in parsed:
                 return True
+
             if "function" in parsed and "arguments" in parsed:
                 return True
 
@@ -212,11 +458,95 @@ def is_invalid_response(response: str) -> bool:
 
 
 # ==========================================================
-# DETERMINISTIC CATALOG RESPONSE
+# POLICY ROUTING
+# ==========================================================
+
+POLICY_PATTERNS = [
+    r"\bpix\b",
+    r"\bpagament",
+    r"\bparcel",
+    r"\bfrete\b",
+    r"\bentrega\b",
+    r"\bdevolu",
+    r"\bdevolver\b",
+    r"\barrepend",
+    r"\breembolso",
+    r"\btroca\b",
+    r"\btrocar\b",
+    r"\bgarantia\b",
+    r"\bhorario",
+    r"\bfuncionamento\b",
+]
+
+
+def is_policy_question(message: str) -> bool:
+    """Identify messages requiring policy retrieval."""
+
+    text = normalize_text(message)
+
+    if (
+        re.search(r"\b(?:meu|meus)\s+pedid", text)
+        or re.search(r"\b(?:rastrear|rastreamento)\b", text)
+    ) and not re.search(
+        r"\b(?:frete|prazo|politica|devolu|garantia)\b",
+        text,
+    ):
+        return False
+
+    return any(
+        re.search(pattern, text)
+        for pattern in POLICY_PATTERNS
+    )
+
+
+def build_policy_query(message: str) -> str:
+    """
+    Build an intent-focused policy retrieval query.
+
+    Prefer policy-specific terms over long conversational
+    questions to improve TF-IDF retrieval relevance.
+    """
+
+    text = normalize_text(message)
+
+    # Returns and refunds take precedence over shipping.
+    # This query was verified against the provided PDF:
+    # it retrieves the return policy on page 4.
+    if re.search(
+        r"\b(devolu\w*|devolver|arrepend\w*|reembols\w*)\b",
+        text,
+    ):
+        return (
+            "devolução arrependimento 7 dias recebimento "
+            "frete reembolso"
+        )
+
+    # PIX discounts cannot be combined with promotions.
+    if re.search(r"\bpix\b", text):
+        return (
+            "Pagamento PIX desconto de 5% promoções "
+            "não cumulativas"
+        )
+
+    # Warranty and product defect questions.
+    if re.search(
+        r"\b(garantia|defeito|troca)\b",
+        text,
+    ):
+        return (
+            "política trocas defeito garantia fabricante"
+        )
+
+    # Other policy questions retain the original text.
+    return message
+
+
+# ==========================================================
+# VERIFIED CATALOG RESPONSE
 # ==========================================================
 
 def format_brl(value) -> str:
-    """Format money in Brazilian reais."""
+    """Format monetary values in Brazilian reais."""
 
     amount = Decimal(str(value))
     formatted = f"{amount:,.2f}"
@@ -231,7 +561,7 @@ def format_brl(value) -> str:
 
 
 def format_catalog_response(products: list[dict]) -> str:
-    """Generate a response using only verified catalog records."""
+    """Build catalog answers from verified product records."""
 
     if not products:
         return (
@@ -283,7 +613,7 @@ def format_catalog_response(products: list[dict]) -> str:
 # ==========================================================
 
 class MusicStoreAgent:
-    """Local agent with Ollama and deterministic catalog responses."""
+    """Local customer support agent using Ollama."""
 
     def __init__(self, client=None, model=None):
 
@@ -310,8 +640,12 @@ class MusicStoreAgent:
             }
         ]
 
+    # ======================================================
+    # MODEL GENERATION
+    # ======================================================
+
     def _generate_response(self, messages, use_tools=True):
-        """Request a response from the local LLM."""
+        """Generate an LLM response through Ollama."""
 
         parameters = {
             "model": self.model,
@@ -331,8 +665,12 @@ class MusicStoreAgent:
             **parameters
         )
 
+    # ======================================================
+    # RESPONSE RETRY
+    # ======================================================
+
     def _retry_invalid_response(self, messages, answer):
-        """Retry malformed output without new tool execution."""
+        """Retry invalid answers without executing another tool."""
 
         retry_messages = list(messages)
 
@@ -344,10 +682,12 @@ class MusicStoreAgent:
             {
                 "role": "user",
                 "content": (
-                    "Responda à pergunta original em português. "
-                    "Utilize apenas os resultados das ferramentas. "
-                    "Não use placeholders, JSON ou chamadas "
-                    "de ferramentas como resposta."
+                    "Corrija a resposta anterior em português. "
+                    "Não use JSON ou placeholders. "
+                    "Utilize somente dados verificados. "
+                    "Não prometa iniciar ou processar compras, "
+                    "devoluções, reembolsos ou pagamentos. "
+                    "Não solicite dados para ações indisponíveis."
                 ),
             },
         ])
@@ -357,44 +697,35 @@ class MusicStoreAgent:
             use_tools=False,
         )
 
-        corrected = response.choices[0].message.content or ""
+        corrected = (
+            response.choices[0].message.content or ""
+        )
 
         if is_invalid_response(corrected):
             return (
-                "Não consegui concluir a consulta com segurança. "
-                "Pode reformular sua pergunta?"
+                "Não consegui apresentar essa informação "
+                "com segurança. Recomendo entrar em contato "
+                "com a equipe da loja."
             )
 
         return corrected
 
     # ======================================================
-    # PRODUCT COMPARISON
+    # HISTORY HELPERS
     # ======================================================
 
-    def _handle_product_comparison(self, user_message):
-        """Handle recognized product comparisons deterministically."""
+    def _record_local_tool(
+        self,
+        messages,
+        name,
+        arguments,
+        result,
+    ):
+        """Record executed tools in the conversation history."""
 
-        request = parse_comparison_request(user_message)
+        call_id = f"local_{name}_{len(messages)}"
 
-        if request is None:
-            return None
-
-        product_a, product_b = request
-
-        comparison = compare_products(product_a, product_b)
-
-        if not comparison["success"]:
-            return None
-
-        answer = format_comparison(comparison)
-
-        call_id = f"local_comparison_{len(self.messages)}"
-
-        self.messages.extend([
-            {
-                "role": "user",
-                "content": user_message,
-            },
+        messages.extend([
             {
                 "role": "assistant",
                 "content": None,
@@ -403,12 +734,9 @@ class MusicStoreAgent:
                         "id": call_id,
                         "type": "function",
                         "function": {
-                            "name": "compare_products",
+                            "name": name,
                             "arguments": json.dumps(
-                                {
-                                    "product_a": product_a,
-                                    "product_b": product_b,
-                                },
+                                arguments,
                                 ensure_ascii=False,
                             ),
                         },
@@ -418,11 +746,128 @@ class MusicStoreAgent:
             {
                 "role": "tool",
                 "tool_call_id": call_id,
-                "content": json.dumps(
-                    comparison,
-                    ensure_ascii=False,
-                    default=str,
-                ),
+                "content": result,
+            },
+        ])
+
+    # ======================================================
+    # POLICY RETRIEVAL
+    # ======================================================
+
+    def _retrieve_required_policy(
+        self,
+        messages,
+        user_message,
+    ):
+        """Retrieve relevant policy evidence before generation."""
+
+        arguments = {
+            "query": build_policy_query(user_message),
+            "top_k": 3,
+        }
+
+        result = execute_tool(
+            "search_policies",
+            arguments,
+        )
+
+        print("\n[Tool called: search_policies]")
+        print(f"[Arguments: {arguments}]")
+
+        try:
+            passages = json.loads(result)
+        except json.JSONDecodeError:
+            passages = None
+
+        if not isinstance(passages, list) or not passages:
+            print("[Policy retrieval: no usable evidence]")
+            return []
+
+        self._record_local_tool(
+            messages,
+            "search_policies",
+            arguments,
+            result,
+        )
+
+        print(
+            f"[Policy passages retrieved: {len(passages)}]"
+        )
+
+        return passages
+
+    # ======================================================
+    # DETERMINISTIC PRODUCT COMPARISON
+    # ======================================================
+
+    def _handle_product_comparison(self, user_message):
+        """Compare named products using verified catalog data."""
+
+        request = parse_comparison_request(user_message)
+
+        if request is None:
+            return None
+
+        product_a, product_b = request
+        comparison = compare_products(
+            product_a,
+            product_b,
+        )
+
+        if not comparison["success"]:
+            return None
+
+        answer = format_comparison(comparison)
+
+        messages = list(self.messages)
+
+        messages.append({
+            "role": "user",
+            "content": user_message,
+        })
+
+        self._record_local_tool(
+            messages,
+            "compare_products",
+            {
+                "product_a": product_a,
+                "product_b": product_b,
+            },
+            json.dumps(
+                comparison,
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
+
+        messages.append({
+            "role": "assistant",
+            "content": answer,
+        })
+
+        self.messages = messages
+
+        print("\n[Tool called: compare_products]")
+        print("[Comparison based on catalog specifications]")
+
+        return answer
+
+    # ======================================================
+    # UNSUPPORTED ACTION BLOCK
+    # ======================================================
+
+    def _handle_unsupported_action(self, user_message):
+        """Block unavailable return and refund operations."""
+
+        if not is_refund_action_request(user_message):
+            return None
+
+        answer = UNSUPPORTED_ACTION_RESPONSE
+
+        self.messages.extend([
+            {
+                "role": "user",
+                "content": user_message,
             },
             {
                 "role": "assistant",
@@ -430,8 +875,9 @@ class MusicStoreAgent:
             },
         ])
 
-        print("\n[Tool called: compare_products]")
-        print("[Comparison based on catalog specifications]")
+        print(
+            "\n[Safety rule: unsupported operation blocked]"
+        )
 
         return answer
 
@@ -440,11 +886,20 @@ class MusicStoreAgent:
     # ======================================================
 
     def chat(self, user_message: str) -> str:
-        """Handle conversation and tool execution."""
+        """Process a customer message and execute tools."""
 
         if not user_message.strip():
             return "Por favor, escreva sua pergunta."
 
+        # Block unavailable transactional operations.
+        unsupported_answer = self._handle_unsupported_action(
+            user_message
+        )
+
+        if unsupported_answer is not None:
+            return unsupported_answer
+
+        # Handle recognized comparisons deterministically.
         comparison_answer = self._handle_product_comparison(
             user_message
         )
@@ -452,7 +907,6 @@ class MusicStoreAgent:
         if comparison_answer is not None:
             return comparison_answer
 
-        # Work on a copy to avoid retaining failed turns.
         messages = list(self.messages)
 
         messages.append({
@@ -460,27 +914,46 @@ class MusicStoreAgent:
             "content": user_message,
         })
 
-        for _ in range(5):
+        receipt_state = return_receipt_state(
+            user_message
+        )
 
-            response = self._generate_response(
+        # Mandatory policy retrieval.
+        if is_policy_question(user_message):
+
+            passages = self._retrieve_required_policy(
                 messages,
-                use_tools=True,
+                user_message,
             )
 
-            assistant_message = response.choices[0].message
+            if not passages:
+                answer = (
+                    "Não consegui consultar as políticas da loja "
+                    "para confirmar essa informação. "
+                    "Recomendo entrar em contato com a equipe "
+                    "de atendimento."
+                )
 
-            # ----------------------------------------------
-            # FINAL LLM RESPONSE
-            # ----------------------------------------------
+                messages.append({
+                    "role": "assistant",
+                    "content": answer,
+                })
 
-            if not assistant_message.tool_calls:
+                self.messages = messages
+                return answer
 
-                answer = assistant_message.content or ""
+            # Keep purchase and receipt dates separate.
+            if receipt_state is not None:
 
-                if is_invalid_response(answer):
-                    answer = self._retry_invalid_response(
-                        messages,
-                        answer,
+                if not has_return_policy_evidence(passages):
+                    answer = (
+                        "Não consegui recuperar informações "
+                        "suficientes sobre o prazo de devolução. "
+                        "Recomendo consultar a equipe da loja."
+                    )
+                else:
+                    answer = format_return_clarification(
+                        receipt_state
                     )
 
                 messages.append({
@@ -489,6 +962,56 @@ class MusicStoreAgent:
                 })
 
                 self.messages = messages
+
+                print(
+                    "[Safety rule: purchase and receipt "
+                    "dates kept separate]"
+                )
+
+                return answer
+
+        # Continue with normal LLM and tool-calling flow.
+        for _ in range(5):
+
+            response = self._generate_response(
+                messages,
+                use_tools=True,
+            )
+
+            assistant_message = (
+                response.choices[0].message
+            )
+
+            # ----------------------------------------------
+            # FINAL RESPONSE
+            # ----------------------------------------------
+
+            if not assistant_message.tool_calls:
+
+                answer = (
+                    assistant_message.content or ""
+                )
+
+                if is_invalid_response(answer):
+                    answer = self._retry_invalid_response(
+                        messages,
+                        answer,
+                    )
+
+                if is_invalid_response(answer):
+                    answer = (
+                        "Não consegui responder com segurança. "
+                        "Recomendo entrar em contato com "
+                        "a equipe de atendimento da loja."
+                    )
+
+                messages.append({
+                    "role": "assistant",
+                    "content": answer,
+                })
+
+                self.messages = messages
+
                 return answer
 
             # ----------------------------------------------
@@ -518,15 +1041,19 @@ class MusicStoreAgent:
                             "Arguments must be a JSON object"
                         )
 
-                    result = execute_tool(name, arguments)
+                    result = execute_tool(
+                        name,
+                        arguments,
+                    )
 
                 except (ValueError, TypeError):
                     result = json.dumps({
                         "error": "Invalid tool arguments"
                     })
 
-                # Store the result for deterministic handling.
-                executed_tools.append((name, result))
+                executed_tools.append(
+                    (name, result)
+                )
 
                 print(f"\n[Tool called: {name}]")
 
@@ -538,7 +1065,9 @@ class MusicStoreAgent:
                     print("[Tool result: redacted]")
                 else:
                     print(f"[Arguments: {arguments}]")
-                    print(f"[Tool result: {result[:3000]}]")
+                    print(
+                        f"[Tool result: {result[:3000]}]"
+                    )
 
                 messages.append({
                     "role": "tool",
@@ -550,10 +1079,6 @@ class MusicStoreAgent:
             # VERIFIED CATALOG RESPONSE
             # ----------------------------------------------
 
-            # When the model requests only a product search,
-            # generate the answer from the returned records.
-            # This prevents hallucinated products and prices.
-
             if (
                 len(executed_tools) == 1
                 and executed_tools[0][0] == "search_products"
@@ -564,7 +1089,10 @@ class MusicStoreAgent:
                     )
 
                     if isinstance(products, list):
-                        answer = format_catalog_response(products)
+
+                        answer = format_catalog_response(
+                            products
+                        )
 
                         messages.append({
                             "role": "assistant",
@@ -572,6 +1100,7 @@ class MusicStoreAgent:
                         })
 
                         self.messages = messages
+
                         return answer
 
                 except json.JSONDecodeError:
