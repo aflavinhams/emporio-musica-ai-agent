@@ -3,30 +3,26 @@ import inspect
 import json
 import os
 import re
+from decimal import Decimal
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from src.agent.prompts import SYSTEM_PROMPT
-
 from src.tools.catalog import search_products
-
 from src.tools.promotions import (
     get_active_promotions,
     get_product_promotion,
 )
-
 from src.tools.orders import (
     get_order_status,
     get_order_items,
 )
-
 from src.tools.comparison import (
     compare_products,
     format_comparison,
     parse_comparison_request,
 )
-
 from src.retrieval.policy_retriever import search_policies
 
 
@@ -50,7 +46,6 @@ TOOL_FUNCTIONS = {
 
 def tool_schema(name, description, properties, required=None):
     """Build a function calling schema."""
-
     return {
         "type": "function",
         "function": {
@@ -70,129 +65,66 @@ TOOLS = [
     tool_schema(
         "search_products",
         (
-            "Search the store's product catalog by name, "
-            "category, price and availability. "
-            "Use this tool for questions about instruments, "
-            "prices and stock. "
-            "The query can contain Portuguese keywords such "
-            "as 'violão', 'guitarra' or a product name. "
-            "Use only_available=true for available products."
+            "Search musical instruments by name, category, "
+            "maximum price and availability. "
+            "Use for product recommendations and stock questions. "
+            "Portuguese keywords such as 'violão' are accepted."
         ),
         {
-            "query": {
-                "type": "string",
-                "description": "Product name or category keyword.",
-            },
-            "category": {
-                "type": "string",
-                "description": "Product category in Portuguese.",
-            },
-            "max_price": {
-                "type": "number",
-                "description": "Maximum product price in BRL.",
-            },
-            "only_available": {
-                "type": "boolean",
-                "description": "Return available products only.",
-            },
+            "query": {"type": "string"},
+            "category": {"type": "string"},
+            "max_price": {"type": "number"},
+            "only_available": {"type": "boolean"},
         },
     ),
-
     tool_schema(
         "get_active_promotions",
-        (
-            "Retrieve active promotions, original prices, "
-            "discount percentages and promotional prices."
-        ),
+        "Retrieve current promotions in the provided dataset.",
         {},
     ),
-
     tool_schema(
         "get_product_promotion",
-        "Find an active promotion for a specific product ID.",
-        {
-            "product_id": {
-                "type": "integer",
-                "description": "Numeric product identifier.",
-            },
-        },
+        "Retrieve a promotion using a numeric product ID.",
+        {"product_id": {"type": "integer"}},
         ["product_id"],
     ),
-
     tool_schema(
         "get_order_status",
-        (
-            "Retrieve an order's status after matching "
-            "its ID and registered customer email. "
-            "Both values must be provided by the customer."
-        ),
+        "Retrieve order status using order ID and registered email.",
         {
-            "order_id": {
-                "type": "integer",
-                "description": "Numeric order identifier.",
-            },
-            "customer_email": {
-                "type": "string",
-                "description": "Email registered for the order.",
-            },
+            "order_id": {"type": "integer"},
+            "customer_email": {"type": "string"},
         },
         ["order_id", "customer_email"],
     ),
-
     tool_schema(
         "get_order_items",
-        (
-            "Retrieve products from an order after matching "
-            "its ID and registered customer email."
-        ),
+        "Retrieve order items using order ID and registered email.",
         {
-            "order_id": {
-                "type": "integer",
-            },
-            "customer_email": {
-                "type": "string",
-            },
+            "order_id": {"type": "integer"},
+            "customer_email": {"type": "string"},
         },
         ["order_id", "customer_email"],
     ),
-
     tool_schema(
         "search_policies",
         (
-            "Search the store policy manual. "
-            "Required for questions about returns, refunds, "
-            "exchanges, shipping, payments, warranties "
-            "and opening hours."
+            "Search the store policy PDF. Required for returns, "
+            "refunds, payments, opening hours, warranties, "
+            "shipping and exchanges."
         ),
         {
-            "query": {
-                "type": "string",
-                "description": "Question about store policies.",
-            },
-            "top_k": {
-                "type": "integer",
-                "description": "Number of passages to retrieve.",
-            },
+            "query": {"type": "string"},
+            "top_k": {"type": "integer"},
         },
         ["query"],
     ),
-
     tool_schema(
         "compare_products",
-        (
-            "Compare two specific instruments using verified "
-            "catalog specifications, prices and availability. "
-            "Do not infer sound quality or product superiority."
-        ),
+        "Compare two products using catalog specifications.",
         {
-            "product_a": {
-                "type": "string",
-                "description": "First product name.",
-            },
-            "product_b": {
-                "type": "string",
-                "description": "Second product name.",
-            },
+            "product_a": {"type": "string"},
+            "product_b": {"type": "string"},
         },
         ["product_a", "product_b"],
     ),
@@ -204,30 +136,26 @@ TOOLS = [
 # ==========================================================
 
 def execute_tool(name: str, arguments: dict) -> str:
-    """Execute an approved tool and serialize the result."""
+    """Execute an allowlisted tool with validated arguments."""
 
     function = TOOL_FUNCTIONS.get(name)
 
     if function is None:
-        return json.dumps({
-            "error": "Unknown tool"
-        })
+        return json.dumps({"error": "Unknown tool"})
 
     if not isinstance(arguments, dict):
-        return json.dumps({
-            "error": "Invalid tool arguments"
-        })
+        return json.dumps({"error": "Invalid tool arguments"})
 
     try:
         signature = inspect.signature(function)
 
-        filtered_arguments = {
+        filtered = {
             key: value
             for key, value in arguments.items()
             if key in signature.parameters
         }
 
-        result = function(**filtered_arguments)
+        result = function(**filtered)
 
         return json.dumps(
             result,
@@ -247,12 +175,12 @@ def execute_tool(name: str, arguments: dict) -> str:
 # ==========================================================
 
 def is_invalid_response(response: str) -> bool:
-    """Detect placeholders and incomplete generated responses."""
+    """Detect placeholders and tool calls exposed as text."""
 
     if not response or not response.strip():
         return True
 
-    invalid_patterns = [
+    patterns = [
         r"\[Product\s*\d+\]",
         r"\[Description\]",
         r"\[Product Name\]",
@@ -262,18 +190,100 @@ def is_invalid_response(response: str) -> bool:
         r"and so on for all",
     ]
 
-    return any(
+    if any(
         re.search(pattern, response, re.IGNORECASE)
-        for pattern in invalid_patterns
-    )
+        for pattern in patterns
+    ):
+        return True
+
+    try:
+        parsed = json.loads(response.strip())
+
+        if isinstance(parsed, dict):
+            if "name" in parsed and "arguments" in parsed:
+                return True
+            if "function" in parsed and "arguments" in parsed:
+                return True
+
+    except json.JSONDecodeError:
+        pass
+
+    return False
 
 
 # ==========================================================
-# AI AGENT
+# DETERMINISTIC CATALOG RESPONSE
+# ==========================================================
+
+def format_brl(value) -> str:
+    """Format money in Brazilian reais."""
+
+    amount = Decimal(str(value))
+    formatted = f"{amount:,.2f}"
+
+    formatted = (
+        formatted.replace(",", "X")
+        .replace(".", ",")
+        .replace("X", ".")
+    )
+
+    return f"R$ {formatted}"
+
+
+def format_catalog_response(products: list[dict]) -> str:
+    """Generate a response using only verified catalog records."""
+
+    if not products:
+        return (
+            "Não encontrei instrumentos disponíveis com "
+            "os critérios informados. Quer tentar outro "
+            "modelo ou uma faixa de preço diferente?"
+        )
+
+    lines = [
+        "Olá! 😊 Encontrei estas opções no nosso catálogo:",
+        "",
+    ]
+
+    for index, product in enumerate(products[:5], start=1):
+        lines.append(
+            f"{index}. {product['name']} - "
+            f"{format_brl(product['price_brl'])}"
+        )
+
+        lines.append(
+            f"   Estoque registrado: "
+            f"{product['stock_quantity']} unidades"
+        )
+
+        if product.get("description"):
+            lines.append(
+                f"   {product['description']}"
+            )
+
+        lines.append("")
+
+    remaining = len(products) - 5
+
+    if remaining > 0:
+        lines.append(
+            f"Temos mais {remaining} opções que atendem "
+            "aos seus critérios."
+        )
+
+    lines.append(
+        "Quer saber mais sobre algum desses instrumentos? 🎸"
+    )
+
+    return "\n".join(lines)
+
+
+# ==========================================================
+# MUSIC STORE AGENT
 # ==========================================================
 
 class MusicStoreAgent:
-    """Local conversational agent using Ollama and tool calling."""
+    """Local agent with Ollama and deterministic catalog responses."""
 
     def __init__(self, client=None, model=None):
 
@@ -300,12 +310,8 @@ class MusicStoreAgent:
             }
         ]
 
-    # ======================================================
-    # MODEL GENERATION
-    # ======================================================
-
     def _generate_response(self, messages, use_tools=True):
-        """Generate an LLM response using Ollama."""
+        """Request a response from the local LLM."""
 
         parameters = {
             "model": self.model,
@@ -313,9 +319,7 @@ class MusicStoreAgent:
             "temperature": 0,
             "extra_body": {
                 "think": False,
-                "options": {
-                    "num_predict": 1024,
-                },
+                "options": {"num_predict": 1024},
             },
         }
 
@@ -327,98 +331,64 @@ class MusicStoreAgent:
             **parameters
         )
 
-    # ======================================================
-    # INVALID RESPONSE RETRY
-    # ======================================================
-
-    def _retry_invalid_response(
-        self,
-        messages,
-        invalid_answer
-    ):
-        """Retry an invalid response using retrieved evidence."""
+    def _retry_invalid_response(self, messages, answer):
+        """Retry malformed output without new tool execution."""
 
         retry_messages = list(messages)
 
-        retry_messages.append({
-            "role": "assistant",
-            "content": invalid_answer,
-        })
-
-        retry_messages.append({
-            "role": "user",
-            "content": (
-                "Sua resposta anterior está incompleta ou "
-                "contém placeholders. Corrija a resposta. "
-                "Responda somente em português brasileiro. "
-                "Utilize exclusivamente os dados reais "
-                "retornados pelas ferramentas anteriores. "
-                "Não invente nomes, preços, características "
-                "ou disponibilidade de produtos. "
-                "Não utilize placeholders. "
-                "Se houver vários produtos, apresente "
-                "de 3 a 5 opções verificadas."
-            ),
-        })
+        retry_messages.extend([
+            {
+                "role": "assistant",
+                "content": answer,
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Responda à pergunta original em português. "
+                    "Utilize apenas os resultados das ferramentas. "
+                    "Não use placeholders, JSON ou chamadas "
+                    "de ferramentas como resposta."
+                ),
+            },
+        ])
 
         response = self._generate_response(
             retry_messages,
             use_tools=False,
         )
 
-        answer = (
-            response.choices[0].message.content or ""
-        )
+        corrected = response.choices[0].message.content or ""
 
-        if is_invalid_response(answer):
+        if is_invalid_response(corrected):
             return (
-                "Não consegui apresentar as informações "
-                "com segurança neste momento. "
-                "Pode tentar reformular sua pergunta?"
+                "Não consegui concluir a consulta com segurança. "
+                "Pode reformular sua pergunta?"
             )
 
-        return answer
+        return corrected
 
     # ======================================================
-    # DETERMINISTIC PRODUCT COMPARISON
+    # PRODUCT COMPARISON
     # ======================================================
 
-    def _handle_product_comparison(
-        self,
-        user_message: str
-    ) -> str | None:
-        """Handle explicit product comparisons with catalog data."""
+    def _handle_product_comparison(self, user_message):
+        """Handle recognized product comparisons deterministically."""
 
-        comparison_request = parse_comparison_request(
-            user_message
-        )
+        request = parse_comparison_request(user_message)
 
-        if comparison_request is None:
+        if request is None:
             return None
 
-        product_a, product_b = comparison_request
+        product_a, product_b = request
 
-        comparison = compare_products(
-            product_a,
-            product_b,
-        )
+        comparison = compare_products(product_a, product_b)
 
         if not comparison["success"]:
             return None
 
         answer = format_comparison(comparison)
 
-        # Register the actual local execution in conversation
-        # history using the same structure as tool calling.
         call_id = f"local_comparison_{len(self.messages)}"
-
-        arguments = json.dumps(
-            {
-                "product_a": product_a,
-                "product_b": product_b,
-            },
-            ensure_ascii=False,
-        )
 
         self.messages.extend([
             {
@@ -434,7 +404,13 @@ class MusicStoreAgent:
                         "type": "function",
                         "function": {
                             "name": "compare_products",
-                            "arguments": arguments,
+                            "arguments": json.dumps(
+                                {
+                                    "product_a": product_a,
+                                    "product_b": product_b,
+                                },
+                                ensure_ascii=False,
+                            ),
                         },
                     }
                 ],
@@ -460,16 +436,15 @@ class MusicStoreAgent:
         return answer
 
     # ======================================================
-    # MAIN CONVERSATION FLOW
+    # MAIN CHAT
     # ======================================================
 
     def chat(self, user_message: str) -> str:
-        """Process a customer message and execute tool calls."""
+        """Handle conversation and tool execution."""
 
         if not user_message.strip():
             return "Por favor, escreva sua pergunta."
 
-        # Handle explicit comparisons deterministically.
         comparison_answer = self._handle_product_comparison(
             user_message
         )
@@ -477,8 +452,7 @@ class MusicStoreAgent:
         if comparison_answer is not None:
             return comparison_answer
 
-        # Work with a copy to preserve the current history
-        # if model execution fails.
+        # Work on a copy to avoid retaining failed turns.
         messages = list(self.messages)
 
         messages.append({
@@ -486,22 +460,18 @@ class MusicStoreAgent:
             "content": user_message,
         })
 
-        max_iterations = 5
-
-        for _ in range(max_iterations):
+        for _ in range(5):
 
             response = self._generate_response(
                 messages,
                 use_tools=True,
             )
 
-            assistant_message = (
-                response.choices[0].message
-            )
+            assistant_message = response.choices[0].message
 
-            # --------------------------------------------------
-            # FINAL RESPONSE
-            # --------------------------------------------------
+            # ----------------------------------------------
+            # FINAL LLM RESPONSE
+            # ----------------------------------------------
 
             if not assistant_message.tool_calls:
 
@@ -519,12 +489,11 @@ class MusicStoreAgent:
                 })
 
                 self.messages = messages
-
                 return answer
 
-            # --------------------------------------------------
-            # TOOL CALLS
-            # --------------------------------------------------
+            # ----------------------------------------------
+            # TOOL EXECUTION
+            # ----------------------------------------------
 
             messages.append(
                 assistant_message.model_dump(
@@ -532,34 +501,36 @@ class MusicStoreAgent:
                 )
             )
 
-            for tool_call in assistant_message.tool_calls:
+            executed_tools = []
 
-                tool_name = tool_call.function.name
+            for call in assistant_message.tool_calls:
+
+                name = call.function.name
                 arguments = {}
 
                 try:
                     arguments = json.loads(
-                        tool_call.function.arguments
+                        call.function.arguments
                     )
 
                     if not isinstance(arguments, dict):
                         raise ValueError(
-                            "Tool arguments must be a JSON object"
+                            "Arguments must be a JSON object"
                         )
 
-                    result = execute_tool(
-                        tool_name,
-                        arguments,
-                    )
+                    result = execute_tool(name, arguments)
 
                 except (ValueError, TypeError):
                     result = json.dumps({
                         "error": "Invalid tool arguments"
                     })
 
-                print(f"\n[Tool called: {tool_name}]")
+                # Store the result for deterministic handling.
+                executed_tools.append((name, result))
 
-                if tool_name in {
+                print(f"\n[Tool called: {name}]")
+
+                if name in {
                     "get_order_status",
                     "get_order_items",
                 }:
@@ -571,11 +542,41 @@ class MusicStoreAgent:
 
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": call.id,
                     "content": result,
                 })
 
-        # Do not preserve incomplete model interactions.
+            # ----------------------------------------------
+            # VERIFIED CATALOG RESPONSE
+            # ----------------------------------------------
+
+            # When the model requests only a product search,
+            # generate the answer from the returned records.
+            # This prevents hallucinated products and prices.
+
+            if (
+                len(executed_tools) == 1
+                and executed_tools[0][0] == "search_products"
+            ):
+                try:
+                    products = json.loads(
+                        executed_tools[0][1]
+                    )
+
+                    if isinstance(products, list):
+                        answer = format_catalog_response(products)
+
+                        messages.append({
+                            "role": "assistant",
+                            "content": answer,
+                        })
+
+                        self.messages = messages
+                        return answer
+
+                except json.JSONDecodeError:
+                    pass
+
         return (
             "Não consegui concluir a consulta. "
             "Por favor, tente reformular sua pergunta."

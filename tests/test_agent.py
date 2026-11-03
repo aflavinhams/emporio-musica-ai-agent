@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 
 from src.agent.agent import (
     MusicStoreAgent,
-    TOOL_FUNCTIONS,
     execute_tool,
 )
 
@@ -16,11 +15,7 @@ from src.agent.agent import (
 # MOCK HELPERS
 # ==========================================================
 
-def make_tool_call(
-    name,
-    arguments,
-    call_id="call_1"
-):
+def make_tool_call(name, arguments, call_id="call_1"):
     """Create a simulated LLM tool call."""
 
     return SimpleNamespace(
@@ -36,7 +31,6 @@ def make_response(content=None, tool_calls=None):
     """Create a simulated Chat Completions response."""
 
     message = MagicMock()
-
     message.content = content
     message.tool_calls = tool_calls
 
@@ -91,6 +85,7 @@ class TestAgent(unittest.TestCase):
     # ------------------------------------------------------
 
     def test_simple_response(self):
+        """Verify a response that does not require tools."""
 
         self.set_responses(
             make_response(
@@ -108,31 +103,31 @@ class TestAgent(unittest.TestCase):
         self.client.chat.completions.create.assert_called_once()
 
     # ------------------------------------------------------
-    # PRODUCT TOOL CALL
+    # PRODUCT TOOL EXECUTION
     # ------------------------------------------------------
 
     def test_product_tool_execution(self):
+        """Verify deterministic product response after tool execution."""
 
         call = make_tool_call(
             "search_products",
             json.dumps({
                 "query": "violão",
-                "max_price": 1000,
+                "max_price": 800,
             }),
         )
 
         self.set_responses(
             make_response(tool_calls=[call]),
-            make_response(
-                content="Encontrei violões disponíveis."
-            ),
         )
 
         fake_products = [
             {
-                "product_id": 1,
-                "name": "Test Guitar",
-                "price_brl": 500.0,
+                "product_id": 83,
+                "name": "Tagima Memphis AC-39 Nylon Natural",
+                "price_brl": 429.90,
+                "stock_quantity": 15,
+                "description": "Violão para iniciantes.",
             }
         ]
 
@@ -142,25 +137,97 @@ class TestAgent(unittest.TestCase):
         ) as mock_execute:
 
             answer = self.agent.chat(
-                "Quais violões custam até R$ 1000?"
+                "Quais violões custam até R$ 800?"
             )
 
             mock_execute.assert_called_once_with(
                 "search_products",
                 {
                     "query": "violão",
-                    "max_price": 1000,
+                    "max_price": 800,
                 },
             )
 
-        self.assertEqual(
+        self.assertIn(
+            "Tagima Memphis AC-39",
             answer,
-            "Encontrei violões disponíveis."
+        )
+
+        self.assertIn(
+            "R$ 429,90",
+            answer,
         )
 
         self.assertEqual(
             self.client.chat.completions.create.call_count,
-            2,
+            1,
+        )
+
+    # ------------------------------------------------------
+    # HALLUCINATION PREVENTION
+    # ------------------------------------------------------
+
+    def test_catalog_never_uses_hallucinated_response(self):
+        """Ensure catalog answers are based on tool results."""
+
+        call = make_tool_call(
+            "search_products",
+            json.dumps({
+                "query": "violão",
+                "max_price": 800,
+            }),
+        )
+
+        hallucinated_response = make_response(
+            content="Violão fictício - R$ 1.299,50"
+        )
+
+        self.set_responses(
+            make_response(tool_calls=[call]),
+            hallucinated_response,
+        )
+
+        fake_products = [
+            {
+                "product_id": 83,
+                "name": "Tagima Memphis AC-39 Nylon Natural",
+                "price_brl": 429.90,
+                "stock_quantity": 15,
+                "description": "Violão para iniciantes.",
+            }
+        ]
+
+        with patch(
+            "src.agent.agent.execute_tool",
+            return_value=json.dumps(fake_products),
+        ):
+            answer = self.agent.chat(
+                "Quais violões vocês têm até R$ 800?"
+            )
+
+        self.assertIn(
+            "Tagima Memphis AC-39",
+            answer,
+        )
+
+        self.assertIn(
+            "R$ 429,90",
+            answer,
+        )
+
+        self.assertNotIn(
+            "Violão fictício",
+            answer,
+        )
+
+        self.assertNotIn(
+            "R$ 1.299,50",
+            answer,
+        )
+
+        self.assertEqual(
+            self.client.chat.completions.create.call_count,
+            1,
         )
 
     # ------------------------------------------------------
@@ -168,6 +235,7 @@ class TestAgent(unittest.TestCase):
     # ------------------------------------------------------
 
     def test_conversation_history(self):
+        """Verify history is maintained across messages."""
 
         self.set_responses(
             make_response(content="Olá!"),
@@ -183,24 +251,25 @@ class TestAgent(unittest.TestCase):
 
         self.assertEqual(
             messages[1]["content"],
-            "Oi"
+            "Oi",
         )
 
         self.assertEqual(
             messages[2]["content"],
-            "Olá!"
+            "Olá!",
         )
 
         self.assertEqual(
             messages[3]["content"],
-            "Pode me ajudar?"
+            "Pode me ajudar?",
         )
 
     # ------------------------------------------------------
-    # INVALID JSON
+    # INVALID JSON ARGUMENTS
     # ------------------------------------------------------
 
     def test_invalid_json_arguments(self):
+        """Verify malformed tool arguments are handled."""
 
         call = make_tool_call(
             "search_products",
@@ -218,7 +287,7 @@ class TestAgent(unittest.TestCase):
 
         self.assertEqual(
             answer,
-            "Não consegui consultar."
+            "Não consegui consultar.",
         )
 
         tool_messages = [
@@ -227,7 +296,10 @@ class TestAgent(unittest.TestCase):
             if message["role"] == "tool"
         ]
 
-        self.assertEqual(len(tool_messages), 1)
+        self.assertEqual(
+            len(tool_messages),
+            1,
+        )
 
         self.assertIn(
             "Invalid tool arguments",
@@ -239,6 +311,7 @@ class TestAgent(unittest.TestCase):
     # ------------------------------------------------------
 
     def test_unknown_tool(self):
+        """Reject tools outside the allowlist."""
 
         result = json.loads(
             execute_tool(
@@ -249,7 +322,7 @@ class TestAgent(unittest.TestCase):
 
         self.assertEqual(
             result["error"],
-            "Unknown tool"
+            "Unknown tool",
         )
 
     # ------------------------------------------------------
@@ -257,28 +330,35 @@ class TestAgent(unittest.TestCase):
     # ------------------------------------------------------
 
     def test_tool_execution_error(self):
+        """Verify tool errors are handled safely."""
 
-        failing_tool = MagicMock(
-            side_effect=ValueError("Invalid value")
-        )
-
-        with patch.dict(
-            TOOL_FUNCTIONS,
-            {
-                "search_products": failing_tool
-            },
+        with patch(
+            "src.agent.agent.search_products",
+            side_effect=ValueError("Invalid price"),
         ):
-
-            result = json.loads(
-                execute_tool(
-                    "search_products",
-                    {"max_price": -100},
+            # Patch the function in the allowlist itself.
+            with patch.dict(
+                "src.agent.agent.TOOL_FUNCTIONS",
+                {
+                    "search_products": (
+                        lambda max_price=-100: (
+                            (_ for _ in ()).throw(
+                                ValueError("Invalid price")
+                            )
+                        )
+                    )
+                },
+            ):
+                result = json.loads(
+                    execute_tool(
+                        "search_products",
+                        {"max_price": -100},
+                    )
                 )
-            )
 
         self.assertEqual(
             result["error"],
-            "Tool execution failed"
+            "Tool execution failed",
         )
 
     # ------------------------------------------------------
@@ -286,14 +366,14 @@ class TestAgent(unittest.TestCase):
     # ------------------------------------------------------
 
     def test_tool_call_limit(self):
+        """Stop after the maximum number of tool cycles."""
 
         responses = []
 
         for index in range(5):
-
             call = make_tool_call(
-                "search_products",
-                "{}",
+                "search_policies",
+                json.dumps({"query": "horário"}),
                 call_id=f"call_{index}",
             )
 
@@ -307,9 +387,8 @@ class TestAgent(unittest.TestCase):
             "src.agent.agent.execute_tool",
             return_value="[]",
         ):
-
             answer = self.agent.chat(
-                "Buscar produtos"
+                "Qual o horário de funcionamento?"
             )
 
         self.assertIn(
@@ -327,10 +406,9 @@ class TestAgent(unittest.TestCase):
     # ------------------------------------------------------
 
     def test_api_failure_preserves_history(self):
+        """Do not save a failed conversation turn."""
 
-        original_messages = list(
-            self.agent.messages
-        )
+        original_messages = list(self.agent.messages)
 
         self.client.chat.completions.create.side_effect = (
             RuntimeError("Connection unavailable")
@@ -349,12 +427,13 @@ class TestAgent(unittest.TestCase):
     # ------------------------------------------------------
 
     def test_empty_message(self):
+        """Handle blank user input without calling the LLM."""
 
         answer = self.agent.chat("   ")
 
         self.assertEqual(
             answer,
-            "Por favor, escreva sua pergunta."
+            "Por favor, escreva sua pergunta.",
         )
 
         self.client.chat.completions.create.assert_not_called()
